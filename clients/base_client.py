@@ -21,6 +21,17 @@ class BaseRepositoryClient(ABC):
     def extract_records(self, result_json):
         pass
 
+    @abstractmethod
+    def search_page(self, query: str, page: int, page_size: int):
+        """Normalised pagination entry point used by PipelineCollector.
+        Each subclass maps (page, page_size) to its own parameter names."""
+        pass
+
+    @abstractmethod
+    def get_total_from_response(self, data: dict) -> int:
+        """Return the total number of matching records reported by the API."""
+        pass
+
     def search_to_df(self, query: str, **kwargs):
         data = self.search(query=query, **kwargs)
         records = self.extract_records(data)
@@ -40,6 +51,9 @@ class BaseRepositoryClient(ABC):
                 "file_type": record.file_types,
                 "file_download_links": [f.download_url for f in record.files],
                 "archive_download_link": record.archive_download_link,
+                "has_qda_export": record.has_qda_export,
+                "has_qual_data": record.has_qual_data,
+                "has_zip": record.has_zip,
             })
 
         return pd.DataFrame(rows)

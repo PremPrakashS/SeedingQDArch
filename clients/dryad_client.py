@@ -1,4 +1,4 @@
-from models.dataset_record import DatasetRecord, FileRecord
+from models.record import DatasetRecord, FileRecord
 from clients.base_client import BaseRepositoryClient
 
 
@@ -8,12 +8,14 @@ class DryadClient(BaseRepositoryClient):
 
     def search(self, query: str, page: int = 1, per_page: int = 20):
         url = f"{self.base_url}/search"
-        params = {
-            "q": query,
-            "page": page,
-            "per_page": per_page
-        }
+        params = {"q": query, "page": page, "per_page": per_page}
         return self.get(url, params=params)
+
+    def search_page(self, query: str, page: int, page_size: int):
+        return self.search(query=query, page=page, per_page=page_size)
+
+    def get_total_from_response(self, data: dict) -> int:
+        return data.get("total", 0)
 
     def extract_records(self, result_json):
         records = []
@@ -32,7 +34,7 @@ class DryadClient(BaseRepositoryClient):
             for f in files:
                 name = f.get("path", "")
                 download_url = ((f.get("_links") or {}).get("download") or {}).get("href", "")
-                ext = name.split(".")[-1].lower() if "." in name else ""
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
                 file_objects.append(FileRecord(name=name, download_url=download_url, extension=ext))
 
             record = DatasetRecord(
@@ -44,7 +46,7 @@ class DryadClient(BaseRepositoryClient):
                 license=ds.get("license", ""),
                 record_page=((links.get("stash:version") or {}).get("href", "")),
                 archive_download_link="",
-                files=file_objects
+                files=file_objects,
             )
             records.append(record)
 

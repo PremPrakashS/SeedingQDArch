@@ -12,7 +12,7 @@ def zenodo_search(query, page = 1, size = 20, open_access_only = True):
     """
     q = query
     if open_access_only:
-        q = f'({query}) access_right:open'
+        q = f'({query}) AND access_right:open'
 
     params = {
         "q": q,
@@ -38,7 +38,7 @@ def extract_records(result_json):
         file_links = []
         for f in files:
             fname = f.get("key")
-            dlink = (f.get("links") or "").get("self") or ""
+            dlink = (f.get("links") or {}).get("self") or ""
             file_links.append((fname, dlink))
 
         rows.append({
