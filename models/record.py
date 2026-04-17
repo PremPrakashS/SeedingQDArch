@@ -2,10 +2,10 @@ from dataclasses import dataclass, field
 from typing import List
 
 # Extensions that indicate a QDA software export — rare and high-value
-QDA_EXTENSIONS = {'qdpx', 'nvpx', 'nvp', 'atlproj', 'mx', 'mx22', 'hpr', 'f4p'}
+QDA_EXTENSIONS = {'qdpx', 'nvpx', 'nvp', 'atlproj', 'mx', 'mx22', 'hpr', 'f4p', 'mx20', 'atlproj9', 'mx24', 'atlasti'}
 
 # Extensions that suggest qualitative text/data files
-QUAL_EXTENSIONS = {'docx', 'doc', 'txt', 'rtf', 'odt', 'xlsx', 'csv', 'tsv', 'xml', 'json'}
+QUAL_EXTENSIONS = {'docx', 'doc', 'txt', 'rtf', 'odt', 'xlsx', 'csv', 'tsv', 'xml', 'json', 'pdf'}
 
 
 @dataclass
@@ -26,6 +26,9 @@ class DatasetRecord:
     record_page: str = ""
     archive_download_link: str = ""
     files: List[FileRecord] = field(default_factory=list)
+    creators: List[str] = field(default_factory=list)  # Authors/creators
+    keywords: List[str] = field(default_factory=list)  # Repository keywords/tags
+    description: str = ""  # Project description
 
     @property
     def files_count(self) -> int:

@@ -1,17 +1,41 @@
+import time
 from abc import ABC, abstractmethod
 import requests
-import pandas as pd
+
+# Status codes worth retrying (server-side transient errors)
+_RETRYABLE = {429, 500, 502, 503, 504}
 
 
 class BaseRepositoryClient(ABC):
-    def __init__(self, base_url: str, timeout: int = 30):
+    download_method: str = "API-CALL"
+
+    def __init__(self, base_url: str, timeout: int = 60, max_retries: int = 3):
         self.base_url = base_url
         self.timeout = timeout
+        self.max_retries = max_retries
 
     def get(self, url: str, params: dict = None):
-        response = requests.get(url, params=params, timeout=self.timeout)
-        response.raise_for_status()
-        return response.json()
+        """GET with exponential backoff on 5xx / timeout errors."""
+        last_exc = None
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.get(url, params=params, timeout=self.timeout)
+                if response.status_code in _RETRYABLE:
+                    wait = 2 ** attempt          # 1 s, 2 s, 4 s
+                    print(f"  [{response.status_code}] retrying in {wait}s "
+                          f"(attempt {attempt + 1}/{self.max_retries})")
+                    time.sleep(wait)
+                    last_exc = requests.HTTPError(response=response)
+                    continue
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.Timeout as exc:
+                wait = 2 ** attempt
+                print(f"  [timeout] retrying in {wait}s "
+                      f"(attempt {attempt + 1}/{self.max_retries})")
+                time.sleep(wait)
+                last_exc = exc
+        raise last_exc
 
     @abstractmethod
     def search(self, query: str, **kwargs):
@@ -32,28 +56,3 @@ class BaseRepositoryClient(ABC):
         """Return the total number of matching records reported by the API."""
         pass
 
-    def search_to_df(self, query: str, **kwargs):
-        data = self.search(query=query, **kwargs)
-        records = self.extract_records(data)
-
-        rows = []
-        for record in records:
-            rows.append({
-                "source": record.source,
-                "id": record.record_id,
-                "title": record.title,
-                "publication_date": record.publication_date,
-                "doi": record.doi,
-                "license": record.license,
-                "record_page": record.record_page,
-                "files_count": record.files_count,
-                "file_names": record.file_names,
-                "file_type": record.file_types,
-                "file_download_links": [f.download_url for f in record.files],
-                "archive_download_link": record.archive_download_link,
-                "has_qda_export": record.has_qda_export,
-                "has_qual_data": record.has_qual_data,
-                "has_zip": record.has_zip,
-            })
-
-        return pd.DataFrame(rows)

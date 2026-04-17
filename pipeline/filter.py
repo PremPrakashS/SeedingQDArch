@@ -1,4 +1,3 @@
-from typing import List
 from models.record import DatasetRecord
 from params.config import OPEN_LICENSE_PREFIXES
 
@@ -72,7 +71,3 @@ def is_relevant(record: DatasetRecord, min_score: int = 1) -> bool:
     if not is_open_license(record.license):
         return False
     return score_record(record) >= min_score
-
-
-def filter_records(records: List[DatasetRecord], min_score: int = 1) -> List[DatasetRecord]:
-    return [r for r in records if is_relevant(r, min_score)]
