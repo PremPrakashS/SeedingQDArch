@@ -113,7 +113,7 @@ def main():
         print("=" * 70)
 
         # Initialize clients
-        zenodo_client = ZenodoClient(timeout=60, access_token="0vhcRrWqQtZVWeT7m8mNI0rnnyIoB4wXSDFQx1iMzgxolGgw6CZcrL2fiXqX")
+        zenodo_client = ZenodoClient(timeout=60, access_token="xyz") # enter your own access token here
         dryad_client = DryadClient(timeout=60)
         clients = [zenodo_client, dryad_client]
 
@@ -122,7 +122,7 @@ def main():
             clients.append(cessda_client)
 
         if args.figshare:
-            figshare_client = FigshareClient(timeout=60, access_token="cdff658a362c6b9006a4a037f16e166a8fbd1e4170d688c8fa4d9994b6d2dc1b653dabc3259ef6f847b6519ad3f601db64cdc59200521833bf5751b24fdea166")
+            figshare_client = FigshareClient(timeout=60, access_token="xyz") # enter you own access token here
             clients.append(figshare_client)
 
         # Select query set
