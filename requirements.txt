@@ -1,3 +1,20 @@
 requests>=2.31.0
 pandas>=2.0.0
 certifi>=2024.0.0
+
+# Classification pipeline
+sentence-transformers>=3.0.0
+PyMuPDF>=1.23.0
+python-docx>=1.1.0
+numpy>=1.26.0
+tqdm>=4.66.0
+openpyxl>=3.1.0
+matplotlib>=3.8.0
+reportlab>=4.1.0
+
+# LLM summarisation (GPU)
+# torch must be installed separately with CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+transformers>=4.40.0
+accelerate>=0.27.0
+bitsandbytes>=0.43.0

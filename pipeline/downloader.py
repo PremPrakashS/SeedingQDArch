@@ -6,18 +6,19 @@ import requests
 
 from models.record import QDA_EXTENSIONS, QUAL_EXTENSIONS
 from pipeline.database import QDArchDatabase
+from params.enums import VALID_DOWNLOAD_STATUS
 
 # Extensions downloaded by default: everything that could be qualitative content.
 # Excludes pure-code files (.r, .py, .html …) and unwanted binaries.
 DEFAULT_EXTENSIONS: Set[str] = QDA_EXTENSIONS | QUAL_EXTENSIONS | {"zip"}
 
-# Download status values stored in the DB
-_ST_SUCCESS = "success"
-_ST_FAILED = "failed"
-_ST_SKIP_SIZE = "skipped_size"
-_ST_SKIP_EXT = "skipped_ext"
-_ST_SKIP_EXISTS = "skipped_exists"
-_ST_SKIP_NOURL = "skipped_no_url"
+# Download status values — mapped to official enum values from params.enums
+_ST_SUCCESS = "SUCCEEDED"
+_ST_FAILED = "FAILED_SERVER_UNRESPONSIVE"
+_ST_SKIP_SIZE = "skipped"           # File too large
+_ST_SKIP_EXT = "skipped"            # Wrong extension
+_ST_SKIP_EXISTS = "skipped"         # File already exists
+_ST_SKIP_NOURL = "skipped"          # No download URL
 
 
 class DatasetDownloader:
