@@ -45,13 +45,18 @@ venv.bak/
 *.sublime-workspace
 
 # Claude Code local settings
-.claude/settings.local.json
+.claude/*
+.understand-anything/*
 
 # Project-specific data (generated at runtime)
-database/
 downloads/
 exports/
+extracted_text/
 QDArch_downloaded_datasets/
+database/backups/
+classify_output/old_classifications
+classify_output/sample*
+*.zip
 
 # OS-specific files
 .DS_Store

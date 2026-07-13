@@ -19,10 +19,13 @@ Usage:
     python collect_data.py --reset                    # Clear database first
 """
 
+import os
 import sys
 import argparse
 from datetime import datetime
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 from params.config import ALL_QUERIES_EN, ALL_QUERIES
 from clients.zenodo_client import ZenodoClient
@@ -31,6 +34,9 @@ from clients.cessda_client import CESSDAClient
 from clients.figshare_client import FigshareClient
 from pipeline.collector import PipelineCollector
 from pipeline.database import QDArchDatabase
+
+# Load API keys from the project-root .env into the environment.
+load_dotenv()
 
 
 def main():
@@ -112,9 +118,13 @@ def main():
         print("COLLECTION PHASE")
         print("=" * 70)
 
-        # Initialize clients
-        zenodo_client = ZenodoClient(timeout=60, access_token="xyz") # enter your own access token here
-        dryad_client = DryadClient(timeout=60)
+        # Initialize clients (API keys loaded from .env)
+        zenodo_client = ZenodoClient(timeout=60, access_token=os.getenv("ZENODO_API_KEY"))
+        dryad_client = DryadClient(
+            timeout=60,
+            client_id=os.getenv("DRY_AD_CLIENT_ID"),
+            client_secret=os.getenv("DRY_AD_CLIENT_SECRET"),
+        )
         clients = [zenodo_client, dryad_client]
 
         if args.cessda:
@@ -122,7 +132,7 @@ def main():
             clients.append(cessda_client)
 
         if args.figshare:
-            figshare_client = FigshareClient(timeout=60, access_token="xyz") # enter you own access token here
+            figshare_client = FigshareClient(timeout=60, access_token=os.getenv("FIGSHARE_API_KEY"))
             clients.append(figshare_client)
 
         # Select query set
