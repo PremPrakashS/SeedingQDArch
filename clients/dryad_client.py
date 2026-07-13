@@ -1,8 +1,12 @@
 import time
+import requests
 from models.record import DatasetRecord, FileRecord
 from clients.base_client import BaseRepositoryClient
 
 _DRYAD_ROOT = "https://datadryad.org"
+_DRYAD_TOKEN_URL = f"{_DRYAD_ROOT}/oauth/token"
+# Refresh the token this many seconds before it actually expires.
+_TOKEN_EXPIRY_MARGIN = 60
 
 
 class DryadClient(BaseRepositoryClient):
@@ -20,16 +24,51 @@ class DryadClient(BaseRepositoryClient):
         base_url: str = "https://datadryad.org/api/v2",
         timeout: int = 60,
         file_fetch_delay: float = 2.0,
+        client_id: str = None,
+        client_secret: str = None,
     ):
         super().__init__(base_url, timeout)
         self.file_fetch_delay = file_fetch_delay
+        # OAuth2 client-credentials. Search is public, but supplying these lets
+        # authenticated calls (and downloads) use a bearer token.
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._token = None
+        self._token_expiry = 0.0
+
+    # ── OAuth2 ────────────────────────────────────────────────────────────────
+
+    def _get_token(self) -> str:
+        """Return a valid bearer token, fetching/refreshing via client-credentials.
+
+        Returns "" when no credentials are configured (search stays unauthenticated).
+        """
+        if not (self.client_id and self.client_secret):
+            return ""
+        if self._token and time.time() < self._token_expiry:
+            return self._token
+        resp = requests.post(
+            _DRYAD_TOKEN_URL,
+            data={"grant_type": "client_credentials"},
+            auth=(self.client_id, self.client_secret),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        self._token = payload["access_token"]
+        self._token_expiry = time.time() + payload.get("expires_in", 0) - _TOKEN_EXPIRY_MARGIN
+        return self._token
+
+    def _auth_headers(self) -> dict:
+        token = self._get_token()
+        return {"Authorization": f"Bearer {token}"} if token else None
 
     # ── BaseRepositoryClient interface ────────────────────────────────────────
 
     def search(self, query: str, page: int = 1, per_page: int = 20):
         url = f"{self.base_url}/search"
         params = {"q": query, "page": page, "per_page": per_page}
-        return self.get(url, params=params)
+        return self.get(url, params=params, headers=self._auth_headers())
 
     def search_page(self, query: str, page: int, page_size: int):
         return self.search(query=query, page=page, per_page=page_size)
@@ -106,7 +145,7 @@ class DryadClient(BaseRepositoryClient):
         """
         url = f"{_DRYAD_ROOT}{version_href}/files"
         try:
-            data = self.get(url)
+            data = self.get(url, headers=self._auth_headers())
         except Exception as exc:
             print(f"  [dryad] could not fetch files from {url}: {exc}")
             return []

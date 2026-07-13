@@ -187,17 +187,33 @@ ISIC_EMBED_EXTRAS: dict[str, str] = {
         "GWAS study; quantitative trait loci; gene regulatory network; "
         "multi-omics integration; omics data; metagenome; microbiome analysis; "
         "plant breeding research; genomic selection; crop science research; "
+        "synthetic biology; plant biotechnology; rapamycin; CRISPR; "
+        "molecular cloning; transgenic plant; gene expression regulation; "
         "ecological economics; environmental economics; sustainability research; "
         "national accounting; ecological GDP; green economy research; "
         "diaspora study; humanitarian research; migration study; "
         "refugee research; indigenous peoples study; postcolonial analysis; "
         "reconciliation research; truth commission analysis; "
         "political discourse analysis; governance research; "
-        "cross-national study; comparative study; international survey; "
+        "multi-country study; cross-national survey; global health research; "
+        "international comparative research; post-conflict research; "
+        "immigrant community research; multicultural community study; "
+        "export promotion research; labour relations research; "
         "psychometric validation; questionnaire validation; scale reliability; "
         "measurement invariance; participant survey; validity evidence; "
         "urban soundscape; acoustic ecology; perceptual study; "
-        "sensory environment research; sound environment"
+        "sensory environment research; sound environment; "
+        # Fix 1: Generic qualitative research tool vocabulary (no product names)
+        # anchors datasets that use coding/analysis software toward N, not K.
+        "qualitative coding tool; qualitative analysis software; "
+        "computer-assisted qualitative analysis; research data management; "
+        "coding scheme; codebook; interview transcript coding; "
+        # Fix 2: Transporter protein vocab moved here from H so pharmacology
+        # datasets score N/72, not H/51 Air transport.
+        "transporter protein; membrane transport; drug transport; "
+        "pharmacokinetics; organic anion transporter; solute carrier; "
+        "ion channel; efflux pump; uptake transporter; drug disposition; "
+        "OAT; OATP; SLC22; SLCO; endogenous metabolite"
     ),
     # H keeps matching pharmacological 'transporters' and virological 'airborne
     # transmission'. Anchor it firmly to the physical transport industry.
@@ -236,16 +252,15 @@ ISIC_EMBED_EXTRAS: dict[str, str] = {
         "foreign ministry; state department; intergovernmental secretariat; "
         "multilateral fund; international civil servant; UN mandate"
     ),
-    # K keeps attracting digital-methods social research ('digital', 'data',
-    # 'platform'). Anchor it to the actual IT/telecoms industry.
+    # K: anchor to actual IT/telecoms industry only. No QDA tool names.
     "K": (
         "software development; app development; programming language; source code; "
         "IT infrastructure; cloud computing; cybersecurity; broadband network; "
         "wireless telecommunications; mobile operator; data centre; "
         "internet service provider; SaaS; DevOps; API development; "
-        "computer systems; network protocol; "
-        "qualitative data analysis software; NVivo; ATLAS.ti; MaxQDA; "
-        "QualCoder; REFI-QDA; QDPX; coding software; QDA tool"
+        "computer systems; network protocol; software engineering; "
+        "system architecture; database management; IT service; "
+        "machine learning deployment; MLOps; federated learning system"
     ),
     # L is often missed for genuine financial datasets (KGP pawnshop collateral
     # was going to G/47). Enrich with financial services vocabulary.
@@ -268,6 +283,33 @@ ISIC_EMBED_EXTRAS: dict[str, str] = {
         "scheduling; travel booking agency; document management; "
         "security guard; facility cleaning; call centre; outsourcing; "
         "administrative staffing; secretarial services"
+    ),
+}
+
+# Division-level vocabulary extras — appended to division title embeddings only.
+# Fixes division-level misses WITHIN a correctly-identified section.
+# Key problem: N/72 (R&D) was losing to N/70 (management consultancy) for
+# toxicology/synthesis/clinical datasets because plain ISIC titles are too generic.
+ISIC_DIV_EXTRAS: dict[str, str] = {
+    # N/72 — Scientific research and development
+    "72": (
+        "laboratory experiment; biochemical analysis; toxicological study; "
+        "drug synthesis; genomic study; clinical research; epidemiological study; "
+        "field experiment; computational modelling; basic research; applied research; "
+        "research protocol; experimental design; scientific methodology; "
+        "data collection instrument; study cohort; sample analysis"
+    ),
+    # N/70 — Management consultancy (anchor away from research)
+    "70": (
+        "corporate strategy; management advice; business consulting; "
+        "organisational restructuring; executive leadership; "
+        "holding company; headquarters operations; strategic planning"
+    ),
+    # N/75 — Veterinary (anchor away from virology/biology research on animals)
+    "75": (
+        "animal clinic; veterinary practice; livestock treatment; "
+        "pet healthcare; animal surgery; veterinary diagnosis; "
+        "companion animal; farm animal medicine"
     ),
 }
 
@@ -294,6 +336,18 @@ def get_all_division_titles() -> list[tuple[str, str, str]]:
         for div, title in data['divisions'].items():
             result.append((sec, div, title))
     return result
+
+
+def dim_isic_rows() -> list[tuple[str, str, str, str, str]]:
+    """Rows for the dim_isic dimension table:
+    (class, section, division, section_title, division_title) for all divisions.
+    ``class`` is the "N/72" join key used by projects/files/classifications."""
+    rows = []
+    for sec, data in ISIC_REV5.items():
+        sec_title = data['title']
+        for div, div_title in data['divisions'].items():
+            rows.append((f"{sec}/{div}", sec, div, sec_title, div_title))
+    return rows
 
 
 def canonical_division_title(section: str, division: str) -> str | None:

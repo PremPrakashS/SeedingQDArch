@@ -14,12 +14,12 @@ class BaseRepositoryClient(ABC):
         self.timeout = timeout
         self.max_retries = max_retries
 
-    def get(self, url: str, params: dict = None):
+    def get(self, url: str, params: dict = None, headers: dict = None):
         """GET with exponential backoff on 5xx / timeout errors."""
         last_exc = None
         for attempt in range(self.max_retries):
             try:
-                response = requests.get(url, params=params, timeout=self.timeout)
+                response = requests.get(url, params=params, headers=headers, timeout=self.timeout)
                 if response.status_code in _RETRYABLE:
                     wait = 2 ** attempt          # 1 s, 2 s, 4 s
                     print(f"  [{response.status_code}] retrying in {wait}s "

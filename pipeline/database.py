@@ -77,6 +77,21 @@ CREATE TABLE IF NOT EXISTS relevance_scores (
 );
 """
 
+_CREATE_EXTRACTED_TEXTS = """
+CREATE TABLE IF NOT EXISTS extracted_texts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id         INTEGER NOT NULL UNIQUE,
+    project_id      INTEGER NOT NULL,
+    source_path     TEXT,
+    extracted_path  TEXT NOT NULL,
+    file_type       TEXT,
+    char_count      INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'extracted',
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+"""
+
 
 class QDArchDatabase:
     """
@@ -130,6 +145,7 @@ class QDArchDatabase:
                 conn.execute(_CREATE_PERSON_ROLE)
                 conn.execute(_CREATE_LICENSES)
                 conn.execute(_CREATE_RELEVANCE_SCORES)
+                conn.execute(_CREATE_EXTRACTED_TEXTS)
                 conn.commit()
             except Exception as e:
                 print(f"  Warning during table creation: {e}")
@@ -299,6 +315,36 @@ class QDArchDatabase:
             lic_id = self.insert_license(project_id, lic)
             ids.append(lic_id)
         return ids
+
+    # ── Write: Extracted Texts ────────────────────────────────────────────────
+
+    def insert_extracted_text(
+        self,
+        file_id: int,
+        project_id: int,
+        extracted_path: str,
+        source_path: Optional[str] = None,
+        file_type: Optional[str] = None,
+        char_count: int = 0,
+        status: str = "extracted",
+    ) -> int:
+        """Insert (or replace) the extracted-text record for a file. Returns row ID."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR REPLACE INTO extracted_texts
+                    (file_id, project_id, source_path, extracted_path, file_type, char_count, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (file_id, project_id, source_path, extracted_path, file_type, char_count, status),
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def get_extracted_file_ids(self) -> set:
+        """Return the set of file_ids that already have an extracted-text record."""
+        df = self.query("SELECT file_id FROM extracted_texts")
+        return set(df["file_id"].tolist()) if not df.empty else set()
 
     # ── Write: Relevance Scores ───────────────────────────────────────────────
 

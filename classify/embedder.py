@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from classify.taxonomy import ISIC_REV5, ISIC_EMBED_EXTRAS, get_section_titles, get_division_titles
+from classify.taxonomy import ISIC_REV5, ISIC_EMBED_EXTRAS, ISIC_DIV_EXTRAS, get_section_titles, get_division_titles
 
 log = logging.getLogger("classify.embedder")
 
@@ -25,6 +25,14 @@ class ClassificationResult:
     division_confidence: float
     status: str           # ACCEPTED / NEEDS_REVIEW / AMBIGUOUS
     flags: list[str] = field(default_factory=list)
+    # Top-k sections by cosine, best first: (code, title, score). Enables the
+    # LLM re-ranker to choose among cosine's strongest candidates.
+    section_ranked: list[tuple[str, str, float]] = field(default_factory=list)
+    # Second-best section with its best division — the secondary_class.
+    secondary_section: str = ""
+    secondary_section_title: str = ""
+    secondary_division: str = ""
+    secondary_division_title: str = ""
 
 
 class ISICEmbedder:
@@ -57,7 +65,7 @@ class ISICEmbedder:
         self._section_embeddings = self._encode(enriched)
         log.info("Pre-encoded %d enriched section embeddings", len(self._section_labels))
 
-    def classify(self, summary: str) -> ClassificationResult:
+    def classify(self, summary: str, topk: int = 3) -> ClassificationResult:
         if self._model is None:
             raise RuntimeError("ISICEmbedder.load() must be called first")
 
@@ -75,12 +83,17 @@ class ISICEmbedder:
         if margin < AMBIGUITY_MARGIN:
             flags.append("AMBIGUOUS")
 
-        # Step 2 — division (within top section only)
-        div_codes, div_titles, div_matrix = self._get_div_embeddings(top_section)
-        div_scores = _cosine_scores(summary_vec, div_matrix)
-        best_div_idx = int(np.argmax(div_scores))
-        top_division = div_codes[best_div_idx]
-        div_conf = float(div_scores[best_div_idx])
+        section_ranked = [
+            (self._section_labels[i], self._section_titles[i], float(sec_scores[i]))
+            for i in ranked[:topk]
+        ]
+
+        # Step 2 — division within the top section
+        top_division, top_div_title, div_conf = self._best_division(summary_vec, top_section)
+
+        # Secondary — second-best section with its own best division
+        sec2 = self._section_labels[second_idx]
+        div2_code, div2_title, _ = self._best_division(summary_vec, sec2)
 
         # Status
         if "AMBIGUOUS" in flags or sec_conf < SEC_THRESHOLD or div_conf < DIV_THRESHOLD:
@@ -92,12 +105,37 @@ class ISICEmbedder:
             section=top_section,
             section_title=self._section_titles[top_idx],
             division=top_division,
-            division_title=div_titles[best_div_idx],
+            division_title=top_div_title,
             section_confidence=sec_conf,
             division_confidence=div_conf,
             status=status,
             flags=flags,
+            section_ranked=section_ranked,
+            secondary_section=sec2,
+            secondary_section_title=self._section_titles[second_idx],
+            secondary_division=div2_code,
+            secondary_division_title=div2_title,
         )
+
+    def divide(self, summary: str, section: str) -> tuple[str, str, float]:
+        """Best division (code, title, confidence) for a summary within a given
+        section. Used to re-derive the division after the LLM re-ranks the
+        section away from cosine's top pick."""
+        if self._model is None:
+            raise RuntimeError("ISICEmbedder.load() must be called first")
+        return self._best_division(self._encode([summary])[0], section)
+
+    def _best_division(self, summary_vec, section: str) -> tuple[str, str, float]:
+        div_codes, div_titles, div_matrix = self._get_div_embeddings(section)
+        div_scores = _cosine_scores(summary_vec, div_matrix)
+        idx = int(np.argmax(div_scores))
+        return div_codes[idx], div_titles[idx], float(div_scores[idx])
+
+    def section_title(self, section: str) -> str:
+        try:
+            return self._section_titles[self._section_labels.index(section)]
+        except ValueError:
+            return ""
 
     def _get_div_embeddings(
         self, section: str
@@ -107,7 +145,11 @@ class ISICEmbedder:
         pairs = get_division_titles(section)
         codes = [c for c, _ in pairs]
         titles = [t for _, t in pairs]
-        matrix = self._encode(titles)
+        enriched = [
+            t + ("; " + ISIC_DIV_EXTRAS[c] if c in ISIC_DIV_EXTRAS else "")
+            for c, t in pairs
+        ]
+        matrix = self._encode(enriched)
         self._div_cache[section] = (codes, titles, matrix)
         return codes, titles, matrix
 

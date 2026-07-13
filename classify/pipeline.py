@@ -6,8 +6,12 @@ from datetime import datetime
 from tqdm import tqdm
 
 from classify import schema
-from classify.classifier import ClassificationEngine, FullClassification
-from classify.context import ContextGatherer
+from classify.classifier import ClassificationEngine, FileClassification, FullClassification
+from classify.context import (
+    PRIMARY_DATA_EXTENSIONS,
+    ContextGatherer,
+    _classify_project_type,
+)
 from classify.embedder import ISICEmbedder
 from classify.logging_config import setup_logging
 from classify.reporter import ClassificationReporter
@@ -26,6 +30,10 @@ class ClassifyPipeline:
         skip_context: bool = False,
         skip_summary: bool = False,
         dry_run: bool = False,
+        project_types: list[str] | None = None,
+        per_file: bool = False,
+        rerank: bool = True,
+        backup: bool = True,
     ):
         self.db_path = db_path
         self.output_dir = output_dir
@@ -33,10 +41,21 @@ class ClassifyPipeline:
         self.skip_context = skip_context
         self.skip_summary = skip_summary
         self.dry_run = dry_run
+        self.project_types = project_types
+        self.per_file = per_file
+        self.rerank = rerank
 
         os.makedirs(output_dir, exist_ok=True)
         self._log_path = setup_logging(output_dir)
         log.info("ClassifyPipeline initialised (db=%s, dry_run=%s)", db_path, dry_run)
+
+        # Back up the DB before any migration or writes (skipped on dry-run).
+        self._backup_path = None
+        if backup and not dry_run:
+            from classify.backup import backup_database
+            self._backup_path = backup_database(db_path)
+            if self._backup_path:
+                log.info("Pre-run backup: %s", self._backup_path)
 
         # Schema migration (idempotent)
         ops = schema.migrate(db_path, dry_run=dry_run)
@@ -61,10 +80,21 @@ class ClassifyPipeline:
             db_path=self.db_path,
             cache_fetched=not self.skip_context,
         )
+
+        # LLM re-ranker reuses the loaded summariser model (needs the LLM).
+        reranker = None
+        if self.rerank and not self.skip_summary:
+            from classify.llm_classifier import LLMClassifier
+            reranker = LLMClassifier(summariser._model, summariser._tokenizer)
+            log.info("LLM re-ranker enabled (top-%d)", 3)
+        elif self.rerank and self.skip_summary:
+            log.warning("--rerank ignored: requires the LLM (not --skip-summary)")
+
         engine = ClassificationEngine(
             summariser=summariser,
             embedder=embedder,
             skip_summary=self.skip_summary,
+            reranker=reranker,
         )
         writer = ClassificationWriter(self.db_path)
 
@@ -75,32 +105,53 @@ class ClassifyPipeline:
             "INSUFFICIENT_DATA": 0,
             "ERROR": 0,
         }
+        file_counters: dict[str, int] = {}
+        files_processed = 0
 
         batch: list[FullClassification] = []
+        file_batch: list[FileClassification] = []
+
+        def flush():
+            # Project batch first: its blanket files.class stamp must land
+            # before per-file labels override it.
+            if batch:
+                writer.write_batch(batch)
+                batch.clear()
+            if file_batch:
+                writer.write_file_batch(file_batch)
+                file_batch.clear()
 
         for pid in tqdm(ids, desc="Classifying", unit="project"):
             try:
-                ctx = gatherer.gather(pid)
+                local_texts = gatherer.local_file_texts(pid)
+                ctx = gatherer.gather(pid, local_texts=local_texts)
                 result = engine.classify(ctx)
                 results.append(result)
 
                 status = result.classification_status
                 counters[status] = counters.get(status, 0) + 1
 
+                file_results: list[FileClassification] = []
+                if self.per_file:
+                    file_results = self._classify_files(pid, engine, local_texts)
+                    files_processed += len(file_results)
+                    for fr in file_results:
+                        file_counters[fr.classification_status] = (
+                            file_counters.get(fr.classification_status, 0) + 1
+                        )
+
                 if not self.dry_run:
                     batch.append(result)
+                    file_batch.extend(file_results)
                     if len(batch) >= self.batch_size:
-                        writer.write_batch(batch)
-                        batch.clear()
+                        flush()
 
             except Exception as exc:
                 log.error("Unexpected error on project %d: %s", pid, exc, exc_info=True)
                 counters["ERROR"] = counters.get("ERROR", 0) + 1
 
-        # Flush remaining batch
-        if batch and not self.dry_run:
-            writer.write_batch(batch)
-            batch.clear()
+        if not self.dry_run:
+            flush()
 
         # Unload LLM to free VRAM before report generation
         if not self.skip_summary:
@@ -112,16 +163,51 @@ class ClassifyPipeline:
             reporter = ClassificationReporter(self.db_path, self.output_dir)
             report_paths = reporter.generate_all(run_timestamp=ts)
 
+        reranked = sum(1 for r in results if r.method == "rerank")
+        rerank_rescued = sum(
+            1 for r in results
+            if r.method == "rerank" and r.classification_status == "ACCEPTED"
+        )
         stats = {
             "total": len(ids),
             "processed": len(results),
             "status_counts": counters,
+            "files_processed": files_processed,
+            "file_status_counts": file_counters,
+            "reranked": reranked,
+            "rerank_rescued": rerank_rescued,
             "report_paths": report_paths,
             "log_path": self._log_path,
+            "backup_path": self._backup_path,
         }
 
         log.info("Pipeline complete: %s", stats["status_counts"])
         return stats
+
+    def _classify_files(
+        self, project_id: int, engine: ClassificationEngine, local_texts
+    ) -> list[FileClassification]:
+        """Classify each primary data file of a project individually.
+
+        Files with local extracted text are embedded on their own content;
+        primary files without text get a NO_TEXT record (their files.class
+        stays inherited from the project)."""
+        with sqlite3.connect(self.db_path) as conn:
+            file_rows = conn.execute(
+                "SELECT id, file_name, file_type FROM files WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+
+        text_by_id = {ft.file_id: ft.text for ft in local_texts}
+        results: list[FileClassification] = []
+        for fid, fname, ftype in file_rows:
+            ext = (ftype or "").lower().lstrip(".")
+            if ext not in PRIMARY_DATA_EXTENSIONS:
+                continue
+            results.append(
+                engine.classify_file(fid, project_id, fname or "", text_by_id.get(fid, ""))
+            )
+        return results
 
     def _resolve_project_ids(self, project_ids: list[int] | None) -> list[int]:
         if project_ids is not None:
@@ -134,8 +220,29 @@ class ClassifyPipeline:
             missing = set(project_ids) - existing
             if missing:
                 log.warning("Project IDs not in DB (skipped): %s", sorted(missing))
-            return valid
+            ids = valid
+        else:
+            with sqlite3.connect(self.db_path) as conn:
+                rows = conn.execute("SELECT id FROM projects ORDER BY id").fetchall()
+            ids = [r[0] for r in rows]
 
+        if self.project_types:
+            wanted = set(self.project_types)
+            ids = [pid for pid in ids if self._project_type(pid) in wanted]
+            log.info("Type filter %s: %d projects match", sorted(wanted), len(ids))
+        return ids
+
+    def _project_type(self, project_id: int) -> str:
+        """Stored projects.type, or derived from file extensions when unset."""
         with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute("SELECT id FROM projects ORDER BY id").fetchall()
-        return [r[0] for r in rows]
+            row = conn.execute(
+                "SELECT type FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+            exts = [
+                r[0] for r in conn.execute(
+                    "SELECT file_type FROM files WHERE project_id=?", (project_id,)
+                ).fetchall() if r[0]
+            ]
+        return _classify_project_type(exts)
