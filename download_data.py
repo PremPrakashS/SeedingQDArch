@@ -15,13 +15,27 @@ Usage:
     python download_data.py --retry-failed          # Retry previously failed files
 """
 
+import os
 import sys
 import argparse
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from pipeline.database import QDArchDatabase
 from pipeline.downloader import DatasetDownloader
+
+# Print file names/paths with non-cp1252 characters without crashing on the
+# Windows console (default encoding can't encode many Unicode filenames).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
+# Load API keys from the project-root .env into the environment.
+load_dotenv()
 
 
 def main():
@@ -58,6 +72,17 @@ def main():
         "--retry-failed",
         action="store_true",
         help="Retry previously failed downloads",
+    )
+    download_group.add_argument(
+        "--dryad-archive",
+        action="store_true",
+        help="Download Dryad datasets as one zip each and extract them "
+             "(far cheaper against Dryad's rate limits than per-file)",
+    )
+    download_group.add_argument(
+        "--extract-zips",
+        action="store_true",
+        help="Extract all downloaded .zip files and add their contents to the database",
     )
 
     # View actions
@@ -109,6 +134,13 @@ def main():
         default=5.0,
         help="Delay between requests in seconds (default: 1.0)",
     )
+    parser.add_argument(
+        "--max-backoff",
+        type=float,
+        default=300.0,
+        help="Max seconds to wait on a rate-limited retry before stopping "
+             "the run to resume later (default: 300)",
+    )
 
     args = parser.parse_args()
 
@@ -119,6 +151,8 @@ def main():
         args.download_by_type,
         args.download_by_status,
         args.retry_failed,
+        args.dryad_archive,
+        args.extract_zips,
         args.stats,
         args.pending,
         args.failed,
@@ -189,13 +223,38 @@ def main():
         request_delay=args.delay,
         timeout=args.timeout,
         max_file_size_mb=args.max_file_size_mb,
+        max_backoff=args.max_backoff,
+        zenodo_token=os.getenv("ZENODO_API_KEY"),
+        figshare_token=os.getenv("FIGSHARE_API_KEY"),
+        dryad_client_id=os.getenv("DRY_AD_CLIENT_ID"),
+        dryad_client_secret=os.getenv("DRY_AD_CLIENT_SECRET"),
     )
+
+    # Extract downloaded zips and catalogue their contents, then exit.
+    if args.extract_zips:
+        print("=" * 70)
+        print("EXTRACT DOWNLOADED ZIP FILES")
+        print("=" * 70)
+        result = downloader.extract_zips()
+        print("\n" + "=" * 70)
+        print("EXTRACTION SUMMARY")
+        print("=" * 70)
+        print(f"  Zips extracted:    {result['zips']}")
+        print(f"  Members found:     {result['members']}")
+        print(f"  New DB entries:    {result['new_entries']}")
+        print(f"  Missing on disk:   {result['missing']}")
+        print(f"  Errors:            {result['errors']}\n")
+        return
 
     # Determine download filters
     extensions = None
     status_filter = "pending"
 
-    if args.download_zip:
+    if args.dryad_archive:
+        print("=" * 70)
+        print("DOWNLOAD PHASE (Dryad dataset archives → extract)")
+        print("=" * 70)
+    elif args.download_zip:
         extensions = {"zip"}
         print("=" * 70)
         print("DOWNLOAD PHASE (ZIP files only)")
@@ -228,11 +287,17 @@ def main():
 
     # Run downloads
     start_time = datetime.now()
-    download_stats = downloader.download_all(
-        status_filter=status_filter,
-        resume=args.resume,
-        extensions=extensions,
-    )
+    if args.dryad_archive:
+        download_stats = downloader.download_all_archives(
+            status_filter=status_filter,
+            resume=args.resume,
+        )
+    else:
+        download_stats = downloader.download_all(
+            status_filter=status_filter,
+            resume=args.resume,
+            extensions=extensions,
+        )
     elapsed = datetime.now() - start_time
 
     print(f"\nDownload completed in {elapsed}")
