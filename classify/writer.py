@@ -18,8 +18,11 @@ class ClassificationWriter:
     ``classifications`` fact table (entity_type = PROJECT | FILE). Section /
     division titles are not stored here — they live in dim_isic."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, purge_files: bool = False):
         self.db_path = db_path
+        # Only a per-file run rewrites file rows, so only it may purge them.
+        # A project-only run must leave existing file classifications intact.
+        self.purge_files = purge_files
         self._repo_cache: dict[int, str] = {}
 
     # ── Repository lookup (denormalised onto the fact) ────────────────────────
@@ -42,6 +45,15 @@ class ClassificationWriter:
             "DELETE FROM classifications WHERE entity_type='PROJECT' AND project_id=?",
             (result.project_id,),
         )
+        # Reclassifying a project invalidates its file rows: the qualitative
+        # file selection may have changed, so rows for files that are no longer
+        # selected must not survive. write_file_batch() runs after this and
+        # re-inserts the current selection.
+        if self.purge_files:
+            conn.execute(
+                "DELETE FROM classifications WHERE entity_type='FILE' AND project_id=?",
+                (result.project_id,),
+            )
         conn.execute(
             """
             INSERT INTO classifications
@@ -126,8 +138,10 @@ class ClassificationWriter:
                             (entity_type, project_id, file_id, repository, class,
                              isic_section, isic_division,
                              section_confidence, division_confidence,
-                             classification_status, method, flags)
-                        VALUES ('FILE',?,?,?,?,?,?,?,?,?,'cosine',?)
+                             classification_status,
+                             secondary_class, secondary_section, secondary_division,
+                             method, rerank_confidence, summary, flags)
+                        VALUES ('FILE',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             r.project_id,
@@ -139,6 +153,12 @@ class ClassificationWriter:
                             r.section_confidence,
                             r.division_confidence,
                             r.classification_status,
+                            r.secondary_class,
+                            r.secondary_section or None,
+                            r.secondary_division or None,
+                            r.method,
+                            r.rerank_confidence,
+                            r.summary or None,
                             json.dumps(r.flags),
                         ),
                     )

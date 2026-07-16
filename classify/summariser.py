@@ -1,5 +1,4 @@
 import logging
-import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,7 +9,10 @@ log = logging.getLogger("classify.summariser")
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 MAX_NEW_TOKENS = 80
 TEMPERATURE = 0.0
-TIMEOUT_SECONDS = 30
+# Deadline handed to generate(max_time=...), which stops sampling itself at the
+# next token boundary. Do NOT enforce this by abandoning a worker thread: the
+# generation would keep running on the GPU and starve the following calls.
+TIMEOUT_SECONDS = 90
 
 SYSTEM_PROMPT = (
     "You are a research dataset summariser. "
@@ -18,6 +20,17 @@ SYSTEM_PROMPT = (
     "Use ONLY information present in the input. Do not infer. "
     "Do not mention the research method or the fact that it is a dataset."
 )
+
+FILE_SYSTEM_PROMPT = (
+    "You are a research file summariser. "
+    "Write a single sentence (20-40 words) describing the subject matter of this file. "
+    "Use ONLY information present in the input. Do not infer. "
+    "Describe what the content is about, not the file format or its structure."
+)
+
+# Characters of a file's text shown to the summariser. The opening of a
+# transcript or paper carries the subject; more than this only slows prefill.
+FILE_TEXT_INPUT = 1200
 
 _CONFABULATION_PHRASES = {
     "do not infer",
@@ -68,51 +81,59 @@ class Summariser:
             log.info("Model loaded. VRAM allocated: %.2f GB", used_gb)
 
     def summarise(self, ctx: "ProjectContext") -> str:
+        return self._summarise(
+            SYSTEM_PROMPT, self._build_input(ctx), f"project {ctx.project_id}"
+        )
+
+    def summarise_file(self, file_name: str, text: str) -> str:
+        """One-sentence summary of a single file's extracted text."""
+        stem = file_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        return self._summarise(
+            FILE_SYSTEM_PROMPT,
+            f"FILE NAME: {stem}\nCONTENT:\n{text[:FILE_TEXT_INPUT]}",
+            f"file {file_name}",
+        )
+
+    def _summarise(self, system_prompt: str, input_text: str, label: str) -> str:
         if self._model is None or self._tokenizer is None:
             raise RuntimeError("Summariser.load() must be called before summarise()")
 
-        input_text = self._build_input(ctx)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": input_text},
         ]
 
-        result: list[str] = []
-        error: list[Exception] = []
+        import torch
 
-        def _run():
-            try:
-                import torch
-                text = self._tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-                inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
-                gen_kwargs: dict = {"max_new_tokens": MAX_NEW_TOKENS}
-                if TEMPERATURE > 0:
-                    gen_kwargs.update(do_sample=True, temperature=TEMPERATURE)
-                else:
-                    gen_kwargs["do_sample"] = False
+        text = self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
+        gen_kwargs: dict = {
+            "max_new_tokens": MAX_NEW_TOKENS,
+            # generate() polls the clock between tokens and returns what it has,
+            # so the deadline is enforced inside the call — nothing is left
+            # running on the GPU to slow down the next file.
+            "max_time": float(TIMEOUT_SECONDS),
+        }
+        if TEMPERATURE > 0:
+            gen_kwargs.update(do_sample=True, temperature=TEMPERATURE)
+        else:
+            gen_kwargs["do_sample"] = False
 
-                with torch.no_grad():
-                    generated = self._model.generate(**inputs, **gen_kwargs)
-                new_tokens = generated[0][inputs.input_ids.shape[1]:]
-                output = self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-                result.append(output)
-            except Exception as exc:
-                error.append(exc)
+        try:
+            with torch.no_grad():
+                generated = self._model.generate(**inputs, **gen_kwargs)
+        except Exception as exc:
+            raise SummarisationError(f"Inference error for {label}: {exc}") from exc
 
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout=TIMEOUT_SECONDS)
+        new_tokens = generated[0][inputs.input_ids.shape[1]:]
+        summary = self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
-        if t.is_alive():
-            raise SummarisationError(f"Timeout after {TIMEOUT_SECONDS}s for project {ctx.project_id}")
-        if error:
-            raise SummarisationError(f"Inference error: {error[0]}") from error[0]
-        if not result:
-            raise SummarisationError("No output from model")
-
-        summary = result[0]
+        if not summary:
+            raise SummarisationError(
+                f"No output within {TIMEOUT_SECONDS}s for {label}"
+            )
         if self._detect_confabulation(summary):
             raise SummarisationError(f"Confabulation detected in output: {summary[:80]}")
 

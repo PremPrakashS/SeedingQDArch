@@ -32,6 +32,33 @@ TEXT_SNIPPET = 2000  # characters of each extracted file used as context
 FILE_TEXT_CAP = 20_000    # max characters read from a local extracted .txt
 MAX_CONTEXT_FILES = 5     # local texts used as project-level context
 
+# --- Per-file classification: which files carry qualitative text? ---
+# Only files whose content is prose are worth summarising and classifying.
+# Tier A: document formats — prose by construction, no content check needed.
+QUAL_DOC_EXTS = {
+    'pdf', 'docx', 'doc', 'txt', 'rtf', 'odt', 'md', 'rmd', 'qmd',
+    'tex', 'srt', 'vtt', 'eaf',
+}
+# Tier B: containers that may hold prose (open-ended survey answers, mailing
+# list archives) or may be pure numbers. Admitted only if _prose_score passes.
+GATED_EXTS = {'csv', 'tsv', 'xlsx', 'xls', 'ods', 'json', 'html', 'htm'}
+# xml is deliberately in neither: the corpus's xml is Dublin Core metadata
+# records and SCORM manifests — alphabetic, but not prose.
+
+# Function words are the signature of running prose. A numeric CSV, a column
+# header row, or a list of author names scores near zero; real prose runs
+# 0.25-0.40. Alphabetic-character ratio alone cannot make this distinction.
+_STOPWORDS = frozenset("""
+a an the and or but if then than that this these those of in on at to for with
+from by as is are was were be been being have has had do does did not no nor
+it its it's they them their there here what which who whom when where why how
+we our you your he she his her i me my all any both each few more most other
+some such only own same so too very can will just about into over under again
+""".split())
+PROSE_STOPWORD_RATIO = 0.12  # prose ~0.25-0.40; metadata/numeric ~0.00-0.05
+PROSE_MIN_WORDS = 60         # too little text to classify on
+PROSE_SAMPLE = 4000          # characters inspected by the gate
+
 # Names that likely describe the project rather than contain raw data.
 _DESCRIPTIVE_NAME_HINTS = (
     "readme", "read_me", "read-me", "description", "about", "summary",
@@ -209,6 +236,33 @@ def build_llm_text(ctx: "ProjectContext", text_budget: int = 900) -> str:
     if ctx.extracted_texts:
         parts.append(f"SAMPLE TEXT: {ctx.extracted_texts[0][:text_budget]}")
     return "\n".join(parts)
+
+def _prose_score(text: str) -> float:
+    """Fraction of words that are English function words — the prose signal."""
+    words = re.findall(r"[A-Za-z']+", text[:PROSE_SAMPLE].lower())
+    if len(words) < PROSE_MIN_WORDS:
+        return 0.0
+    return sum(w in _STOPWORDS for w in words) / len(words)
+
+
+def is_qualitative(file_type: str, text: str) -> bool:
+    """True when a file's extracted text is worth classifying on its own.
+
+    Document formats are admitted outright; tabular/markup containers only when
+    their content actually reads as prose."""
+    ext = (file_type or "").lower().lstrip(".")
+    if not text or not text.strip():
+        return False
+    if ext in QUAL_DOC_EXTS:
+        return True
+    if ext in GATED_EXTS:
+        return _prose_score(text) >= PROSE_STOPWORD_RATIO
+    return False
+
+
+def select_qualitative_files(texts: list[FileText]) -> list[FileText]:
+    return [ft for ft in texts if is_qualitative(ft.file_type, ft.text)]
+
 
 def _context_priority(ft: FileText) -> tuple[int, str]:
     """Sort key: files most likely to describe the research come first.

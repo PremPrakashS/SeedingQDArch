@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 from classify.context import ProjectContext, build_llm_text
 from classify.embedder import DIV_THRESHOLD, ISICEmbedder
 from classify.summariser import Summariser, SummarisationError
+from classify.taxonomy import DEMOTED_SECTION
+
+# Sections that may not win the primary label merely because the data came from
+# a study. The embedder still lets N stand when nothing else fits — see
+# N_KEEP_MARGIN.
+DEMOTE = frozenset({DEMOTED_SECTION})
 
 log = logging.getLogger("classify.classifier")
 
@@ -61,6 +67,19 @@ class FileClassification:
     classification_status: str  # ACCEPTED / NEEDS_REVIEW / AMBIGUOUS / NO_TEXT / ERROR
     flags: list[str] = field(default_factory=list)
     error_detail: str = ""
+    summary: str = ""
+    secondary_section: str = ""
+    secondary_section_title: str = ""
+    secondary_division: str = ""
+    secondary_division_title: str = ""
+    method: str = "cosine"          # cosine | rerank
+    rerank_confidence: float = 0.0
+
+    @property
+    def secondary_class(self) -> str | None:
+        if self.secondary_section and self.secondary_division:
+            return f"{self.secondary_section}/{self.secondary_division}"
+        return None
 
 
 class ClassificationEngine:
@@ -123,7 +142,7 @@ class ClassificationEngine:
             base.summary = summary
 
         try:
-            result = self._embedder.classify(summary, topk=RERANK_TOPK)
+            result = self._embedder.classify(summary, topk=RERANK_TOPK, demote=DEMOTE)
             base.isic_section = result.section
             base.isic_section_title = result.section_title
             base.isic_division = result.division
@@ -148,7 +167,8 @@ class ClassificationEngine:
 
             # LLM re-rank only the uncertain ones, choosing among cosine's top-k.
             if base.classification_status == "NEEDS_REVIEW" and self._reranker is not None:
-                self._apply_rerank(ctx, summary, result, base)
+                self._apply_rerank(build_llm_text(ctx), summary, result, base,
+                                   label=f"project {ctx.project_id}")
 
         except Exception as exc:
             base.classification_status = "ERROR"
@@ -158,16 +178,17 @@ class ClassificationEngine:
 
         return base
 
-    def _apply_rerank(self, ctx, summary, result, base) -> None:
+    def _apply_rerank(self, llm_text, summary, result, base, label: str) -> None:
         """Ask the LLM to choose among cosine's top-k candidate sections, then
-        re-derive the division within the chosen section and update status."""
+        re-derive the division within the chosen section and update status.
+        Shared by project- and file-level classification."""
         candidates = [(c, t) for c, t, _ in result.section_ranked]
         if len(candidates) < 2:
             return
         try:
-            probs = self._reranker.rerank(build_llm_text(ctx), candidates)
+            probs = self._reranker.rerank(llm_text, candidates)
         except Exception as exc:
-            log.warning("Project %d rerank failed: %s", ctx.project_id, exc)
+            log.warning("%s rerank failed: %s", label, exc)
             return
 
         chosen, prob = max(probs.items(), key=lambda kv: kv[1])
@@ -216,20 +237,44 @@ class ClassificationEngine:
         if not text or not text.strip():
             return base
 
+        # Same path as a project: summarise the raw text, embed the summary,
+        # then let the LLM re-rank the uncertain ones. Raw extracted text is a
+        # far noisier embedding input than a distilled summary.
+        embed_input = _file_embed_input(file_name, text)
+        if not self._skip_summary:
+            try:
+                base.summary = self._summariser.summarise_file(file_name, text)
+                embed_input = base.summary
+            except SummarisationError as exc:
+                base.flags.append("summarisation_failed")
+                log.warning("File %d summarisation failed: %s", file_id, exc)
+
         try:
-            result = self._embedder.classify(_file_embed_input(file_name, text))
+            result = self._embedder.classify(embed_input, topk=RERANK_TOPK, demote=DEMOTE)
             base.isic_section = result.section
             base.isic_section_title = result.section_title
             base.isic_division = result.division
             base.isic_division_title = result.division_title
             base.section_confidence = result.section_confidence
             base.division_confidence = result.division_confidence
-            base.flags = list(result.flags)
+            base.secondary_section = result.secondary_section
+            base.secondary_section_title = result.secondary_section_title
+            base.secondary_division = result.secondary_division
+            base.secondary_division_title = result.secondary_division_title
+            for f in result.flags:
+                if f not in base.flags:
+                    base.flags.append(f)
 
             if result.status == "NEEDS_REVIEW" or "AMBIGUOUS" in base.flags:
                 base.classification_status = "NEEDS_REVIEW"
             else:
                 base.classification_status = "ACCEPTED"
+
+            if base.classification_status == "NEEDS_REVIEW" and self._reranker is not None:
+                self._apply_rerank(
+                    _file_llm_text(file_name, base.summary, text),
+                    embed_input, result, base, label=f"file {file_id}",
+                )
 
         except Exception as exc:
             base.classification_status = "ERROR"
@@ -240,10 +285,23 @@ class ClassificationEngine:
         return base
 
 
-def _file_embed_input(file_name: str, text: str) -> str:
+def _file_name_words(file_name: str) -> str:
     # File names carry signal ("interview_transcripts_nurses.docx") but only
     # once separators are turned back into words.
     stem = file_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     stem = stem.rsplit(".", 1)[0]
-    stem = re.sub(r"[_\-.]+", " ", stem).strip()
-    return f"{stem}. {text[:FILE_TEXT_BUDGET]}".strip()
+    return re.sub(r"[_\-.]+", " ", stem).strip()
+
+
+def _file_embed_input(file_name: str, text: str) -> str:
+    """Fallback embedding input when no summary is available."""
+    return f"{_file_name_words(file_name)}. {text[:FILE_TEXT_BUDGET]}".strip()
+
+
+def _file_llm_text(file_name: str, summary: str, text: str) -> str:
+    """Context shown to the re-ranker for a file."""
+    parts = [f"FILE: {_file_name_words(file_name)}"]
+    if summary:
+        parts.append(f"SUMMARY: {summary}")
+    parts.append(f"SAMPLE TEXT: {text[:900]}")
+    return "\n".join(parts)

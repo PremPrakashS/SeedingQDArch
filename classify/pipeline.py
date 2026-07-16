@@ -8,9 +8,9 @@ from tqdm import tqdm
 from classify import schema
 from classify.classifier import ClassificationEngine, FileClassification, FullClassification
 from classify.context import (
-    PRIMARY_DATA_EXTENSIONS,
     ContextGatherer,
     _classify_project_type,
+    select_qualitative_files,
 )
 from classify.embedder import ISICEmbedder
 from classify.logging_config import setup_logging
@@ -96,7 +96,7 @@ class ClassifyPipeline:
             skip_summary=self.skip_summary,
             reranker=reranker,
         )
-        writer = ClassificationWriter(self.db_path)
+        writer = ClassificationWriter(self.db_path, purge_files=self.per_file)
 
         results: list[FullClassification] = []
         counters = {
@@ -107,6 +107,8 @@ class ClassifyPipeline:
         }
         file_counters: dict[str, int] = {}
         files_processed = 0
+        self._files_skipped = 0
+        file_results_all: list[FileClassification] = []
 
         batch: list[FullClassification] = []
         file_batch: list[FileClassification] = []
@@ -135,6 +137,7 @@ class ClassifyPipeline:
                 if self.per_file:
                     file_results = self._classify_files(pid, engine, local_texts)
                     files_processed += len(file_results)
+                    file_results_all.extend(file_results)
                     for fr in file_results:
                         file_counters[fr.classification_status] = (
                             file_counters.get(fr.classification_status, 0) + 1
@@ -173,9 +176,15 @@ class ClassifyPipeline:
             "processed": len(results),
             "status_counts": counters,
             "files_processed": files_processed,
+            "files_skipped_non_qualitative": self._files_skipped,
             "file_status_counts": file_counters,
             "reranked": reranked,
             "rerank_rescued": rerank_rescued,
+            "files_reranked": sum(1 for r in file_results_all if r.method == "rerank"),
+            "files_rerank_rescued": sum(
+                1 for r in file_results_all
+                if r.method == "rerank" and r.classification_status == "ACCEPTED"
+            ),
             "report_paths": report_paths,
             "log_path": self._log_path,
             "backup_path": self._backup_path,
@@ -187,27 +196,18 @@ class ClassifyPipeline:
     def _classify_files(
         self, project_id: int, engine: ClassificationEngine, local_texts
     ) -> list[FileClassification]:
-        """Classify each primary data file of a project individually.
+        """Classify the qualitative files of a project individually.
 
-        Files with local extracted text are embedded on their own content;
-        primary files without text get a NO_TEXT record (their files.class
-        stays inherited from the project)."""
-        with sqlite3.connect(self.db_path) as conn:
-            file_rows = conn.execute(
-                "SELECT id, file_name, file_type FROM files WHERE project_id=?",
-                (project_id,),
-            ).fetchall()
-
-        text_by_id = {ft.file_id: ft.text for ft in local_texts}
-        results: list[FileClassification] = []
-        for fid, fname, ftype in file_rows:
-            ext = (ftype or "").lower().lstrip(".")
-            if ext not in PRIMARY_DATA_EXTENSIONS:
-                continue
-            results.append(
-                engine.classify_file(fid, project_id, fname or "", text_by_id.get(fid, ""))
-            )
-        return results
+        Only files whose extracted text is actually prose are classified (see
+        context.select_qualitative_files): numeric CSVs, images, archives and
+        build artefacts carry no subject matter of their own and keep the class
+        inherited from their project."""
+        qualitative = select_qualitative_files(local_texts)
+        self._files_skipped += len(local_texts) - len(qualitative)
+        return [
+            engine.classify_file(ft.file_id, project_id, ft.file_name, ft.text)
+            for ft in qualitative
+        ]
 
     def _resolve_project_ids(self, project_ids: list[int] | None) -> list[int]:
         if project_ids is not None:

@@ -161,59 +161,33 @@ ISIC_REV5: dict[str, dict] = {
 # These phrases never appear in reports or DB — they only steer the cosine scorer.
 # Populated based on observed misclassification patterns across 110 test projects.
 ISIC_EMBED_EXTRAS: dict[str, str] = {
-    # N/72 is the most under-predicted section. Almost all pure research datasets
-    # (biomedical, genomics, social science, environmental) belong here but lose to
-    # domain-specific vocabulary in A, H, C, K, V.
+    # POLICY — domain-first. The label must answer "what is this research ABOUT",
+    # not "what activity produced it". Under a literal reading of ISIC every
+    # academic dataset is N/72 (R&D), which makes the label worthless, so:
+    #
+    #   * Section N carries ONLY R&D-as-an-economic-activity and meta-research
+    #     vocabulary (research about research: data management, CAQDAS tooling).
+    #   * Subject vocabulary lives in the section that owns the SUBJECT — crop
+    #     genomics in A, pharmacology in R, and so on.
+    #   * Research METHOD vocabulary ("thematic analysis", "cohort study",
+    #     "semi-structured interviews") belongs nowhere. Every study has a
+    #     method; method terms in any section make it a magnet.
+    #
+    # Do NOT re-add domain nouns to N to "fix" a single project — that is how N
+    # became a dumping ground for 52% of the corpus. If a project has no honest
+    # domain section, it SHOULD fall back to N with low confidence and be
+    # flagged for review. See is_meta_research() and ISICEmbedder.classify(demote=).
     "N": (
-        "laboratory experiment; in vivo study; in vitro study; clinical trial; "
-        "randomized controlled trial; cohort study; longitudinal study; "
-        "cross-sectional study; observational study; mixed-methods study; "
-        "systematic review; meta-analysis; field study; experimental data; "
-        "genomics; transcriptomics; proteomics; metabolomics; metatranscriptomics; "
-        "bioinformatics; DNA sequencing; gene expression; molecular biology; "
-        "biochemistry; cell biology; immunology; neuroscience; pharmacology; "
-        "toxicology; epidemiology; ecology; palaeontology; oceanography; "
-        "atmospheric science; materials science; nanotechnology; nanoplastics; "
-        "thematic analysis; grounded theory; qualitative research; "
-        "qualitative data analysis; semi-structured interviews; focus groups; "
-        "ethnographic study; discourse analysis; content analysis; "
-        "survey research; interview study; phenomenological analysis; "
-        "research dataset; scientific study; empirical research; "
-        "research findings; study participants; data collection; "
-        "remote sensing; satellite imagery; earth observation; "
-        "machine learning model; deep learning; neural network; "
-        "climate data; environmental monitoring; geospatial analysis; "
-        "plant genomics; plant science research; genomic prediction; "
-        "GWAS study; quantitative trait loci; gene regulatory network; "
-        "multi-omics integration; omics data; metagenome; microbiome analysis; "
-        "plant breeding research; genomic selection; crop science research; "
-        "synthetic biology; plant biotechnology; rapamycin; CRISPR; "
-        "molecular cloning; transgenic plant; gene expression regulation; "
-        "ecological economics; environmental economics; sustainability research; "
-        "national accounting; ecological GDP; green economy research; "
-        "diaspora study; humanitarian research; migration study; "
-        "refugee research; indigenous peoples study; postcolonial analysis; "
-        "reconciliation research; truth commission analysis; "
-        "political discourse analysis; governance research; "
-        "multi-country study; cross-national survey; global health research; "
-        "international comparative research; post-conflict research; "
-        "immigrant community research; multicultural community study; "
-        "export promotion research; labour relations research; "
-        "psychometric validation; questionnaire validation; scale reliability; "
-        "measurement invariance; participant survey; validity evidence; "
-        "urban soundscape; acoustic ecology; perceptual study; "
-        "sensory environment research; sound environment; "
-        # Fix 1: Generic qualitative research tool vocabulary (no product names)
-        # anchors datasets that use coding/analysis software toward N, not K.
+        "research and experimental development services; contract research organisation; "
+        "research institute; commissioned R&D; scientific research services; "
+        "laboratory testing services; technical testing and analysis; "
+        # Meta-research: projects genuinely ABOUT the practice of research. These
+        # are the legitimate N/72 cases and must keep winning the section.
+        "research data management; research data infrastructure; FAIR data principles; "
+        "open science practice; data sharing and reuse; research reproducibility; "
         "qualitative coding tool; qualitative analysis software; "
-        "computer-assisted qualitative analysis; research data management; "
-        "coding scheme; codebook; interview transcript coding; "
-        # Fix 2: Transporter protein vocab moved here from H so pharmacology
-        # datasets score N/72, not H/51 Air transport.
-        "transporter protein; membrane transport; drug transport; "
-        "pharmacokinetics; organic anion transporter; solute carrier; "
-        "ion channel; efflux pump; uptake transporter; drug disposition; "
-        "OAT; OATP; SLC22; SLCO; endogenous metabolite"
+        "computer-assisted qualitative data analysis; CAQDAS; "
+        "codebook development; research software tooling"
     ),
     # H keeps matching pharmacological 'transporters' and virological 'airborne
     # transmission'. Anchor it firmly to the physical transport industry.
@@ -223,9 +197,9 @@ ISIC_EMBED_EXTRAS: dict[str, str] = {
         "delivery service; air traffic control; port operations; warehouse; "
         "supply chain logistics; vehicle routing; transport network"
     ),
-    # A wins for plant molecular biology and animal genomics because 'plant',
-    # 'animal', 'fish' appear in research summaries. Anchor firmly to
-    # agricultural/forestry production activities, not scientific research on them.
+    # A owns living-organism subjects: crops, livestock, forests, fisheries —
+    # INCLUDING the molecular/genomic research done on them (plant genomics is
+    # about plants). Production vocabulary keeps it anchored to the sector.
     "A": (
         "farming; crop production; soil management; irrigation system; harvesting; "
         "livestock breeding; cattle ranching; poultry farming; aquaculture farm; "
@@ -234,7 +208,14 @@ ISIC_EMBED_EXTRAS: dict[str, str] = {
         "food production; rural agriculture; field crop; grain production; "
         "animal husbandry; farm management; agricultural land; orchard; "
         "nursery production; crop rotation; seed variety; planting season; "
-        "tractor; irrigation canal; smallholder farmer; pasture; grazing land"
+        "tractor; irrigation canal; smallholder farmer; pasture; grazing land; "
+        # Subjects: plant/animal/fisheries science belongs to the sector it studies.
+        "plant genomics; plant science; crop science; plant breeding; "
+        "genomic selection; genomic prediction; quantitative trait loci; "
+        "GWAS in crops; transgenic plant; plant biotechnology; plant physiology; "
+        "seed genetics; crop yield trait; agronomy; horticulture; "
+        "animal genomics; livestock genetics; fish stock; fisheries; "
+        "forest ecology; tree species; wildlife population; soil microbiome"
     ),
     # V/99 fires on any qualitative research with international/humanitarian/
     # multicountry framing. Anchor hard to the actual institutions and their
@@ -252,7 +233,8 @@ ISIC_EMBED_EXTRAS: dict[str, str] = {
         "foreign ministry; state department; intergovernmental secretariat; "
         "multilateral fund; international civil servant; UN mandate"
     ),
-    # K: anchor to actual IT/telecoms industry only. No QDA tool names.
+    # K: the IT/telecoms industry, plus AI/ML as a subject in its own right.
+    # No QDA tool names — those are meta-research and belong to N.
     "K": (
         "software development; app development; programming language; source code; "
         "IT infrastructure; cloud computing; cybersecurity; broadband network; "
@@ -260,7 +242,59 @@ ISIC_EMBED_EXTRAS: dict[str, str] = {
         "internet service provider; SaaS; DevOps; API development; "
         "computer systems; network protocol; software engineering; "
         "system architecture; database management; IT service; "
-        "machine learning deployment; MLOps; federated learning system"
+        "machine learning deployment; MLOps; federated learning system; "
+        "machine learning model; deep learning; neural network; "
+        "large language model; generative AI; computer vision; algorithm design"
+    ),
+    # R owns human health and social care as SUBJECTS — which is where biomedical,
+    # clinical and pharmacological research belongs (a study of drug transporters
+    # is about health, not about "doing research"). The transporter vocabulary
+    # lives here, not in N and not in H (which reads it as freight).
+    "R": (
+        "patient care; hospital; clinic; nursing; physician; medical treatment; "
+        "public health; mental health; psychiatric care; wellbeing; "
+        "social work; social care; caregiving; residential care home; "
+        "disability support; child welfare; elderly care; "
+        # Biomedical / clinical subjects
+        "clinical medicine; disease; diagnosis; therapy; drug treatment; "
+        "epidemiology; immunology; neuroscience; pharmacology; toxicology; "
+        "molecular biology; gene expression; cell biology; biochemistry; "
+        "genomics; transcriptomics; proteomics; metabolomics; bioinformatics; "
+        "DNA sequencing; CRISPR; molecular cloning; synthetic biology; "
+        "microbiome; pathogen; infection; vaccine; "
+        "pharmacokinetics; drug transport; drug disposition; transporter protein; "
+        "membrane transport; organic anion transporter; solute carrier; "
+        "ion channel; efflux pump; endogenous metabolite"
+    ),
+    # E owns water, waste and the environment as SUBJECTS: ecology, climate,
+    # marine and pollution research describe the environment being studied.
+    "E": (
+        "water supply; water treatment; drinking water quality; sewerage; "
+        "wastewater; sanitation; waste collection; recycling; landfill; "
+        "pollution control; site remediation; contaminated land; "
+        # Environmental subjects
+        "ecology; ecosystem; biodiversity; species abundance; food web; "
+        "marine ecosystem; ocean; oceanography; freshwater; lake; river basin; "
+        "climate change; climate data; atmospheric science; "
+        "environmental monitoring; environmental contamination; "
+        "microplastics; nanoplastics; pollutant; emissions; "
+        "sustainability; conservation; habitat"
+    ),
+    # Q owns education as a subject: teaching, learners, curriculum, pedagogy.
+    "Q": (
+        "school; classroom; teaching; teacher; pupil; student; learner; "
+        "curriculum; pedagogy; lesson; instruction; learning outcome; "
+        "higher education; university; undergraduate; academic staff; "
+        "vocational training; educational attainment; literacy; "
+        "preservice teacher; teacher education; educational assessment"
+    ),
+    # P owns government, policy and public administration as subjects.
+    "P": (
+        "public administration; government policy; public sector; regulation; "
+        "policy implementation; legislation; ministry; civil service; "
+        "governance; public service delivery; state institution; "
+        "defence; national security; border control; migration policy; "
+        "asylum policy; public consultation"
     ),
     # L is often missed for genuine financial datasets (KGP pawnshop collateral
     # was going to G/47). Enrich with financial services vocabulary.
@@ -318,6 +352,20 @@ _ALL_DIVISIONS: dict[str, str] = {}  # division_code -> section_letter
 for _sec, _data in ISIC_REV5.items():
     for _div in _data['divisions']:
         _ALL_DIVISIONS[_div] = _sec
+
+
+# Section N may not win the primary label merely because the data came from a
+# study: under a literal reading of ISIC every academic dataset is N/72
+# "Scientific research and development", which says nothing about the subject.
+# The embedder demotes it in favour of the domain the research is ABOUT, but
+# lets it stand when the text has no domain subject at all (a methodology or
+# research-data paper) — see ISICEmbedder.classify and N_KEEP_MARGIN.
+#
+# A keyword test for "meta-research" was tried here and removed: it fired on any
+# summary that merely mentioned its method ("design-based research methodology")
+# while missing real meta-research ("Qualitative Research Using Open Tools").
+# The cosine margin separates the two cleanly; keywords do not.
+DEMOTED_SECTION = "N"
 
 
 def get_section_titles() -> list[tuple[str, str]]:

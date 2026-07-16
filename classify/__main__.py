@@ -137,9 +137,13 @@ def main():
         print(f"Re-ranked (NEEDS_REVIEW): {stats['reranked']}, "
               f"rescued to ACCEPTED: {stats['rerank_rescued']}")
     if stats.get("files_processed"):
-        print(f"Files classified: {stats['files_processed']}")
+        print(f"Files classified: {stats['files_processed']} "
+              f"(skipped {stats.get('files_skipped_non_qualitative', 0)} non-qualitative)")
         for status, count in sorted(stats["file_status_counts"].items()):
             print(f"  {status:<20} {count}")
+        if stats.get("files_reranked"):
+            print(f"  Re-ranked: {stats['files_reranked']}, "
+                  f"rescued to ACCEPTED: {stats['files_rerank_rescued']}")
     if stats.get("backup_path"):
         print(f"Backup: {stats['backup_path']}")
     if stats["report_paths"]:

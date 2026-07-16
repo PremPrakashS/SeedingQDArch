@@ -28,8 +28,13 @@ MARGIN_THRESHOLD = 0.15   # top-2 probability gap below this -> AMBIGUOUS
 
 SECTION_SYSTEM = (
     "You are an expert economic-activity classifier using the ISIC Rev. 5 "
-    "taxonomy. You are given a research dataset. Choose the single ISIC section "
-    "whose economic activity the dataset's SUBJECT most closely belongs to. "
+    "taxonomy. You are given a research dataset. Identify the sector that the "
+    "research is ABOUT — the real-world activity being studied.\n"
+    "Every dataset here was produced by researchers, so 'research' is never the "
+    "answer by itself: do NOT choose 'Professional, scientific and technical "
+    "activities' merely because the data came from a study. A study of crop "
+    "genetics is about agriculture; a study of drug transporters is about human "
+    "health; a study of teachers is about education.\n"
     "Answer with ONLY the one capital letter of that section."
 )
 DIVISION_SYSTEM = (
@@ -75,7 +80,8 @@ class LLMClassifier:
         return self._choose(
             SECTION_SYSTEM,
             f"DATASET:\n{context_text}\n\nCANDIDATE SECTIONS:\n{menu}\n\n"
-            f"Answer with the single letter of the best-matching section.\nAnswer:",
+            f"Which sector is this research ABOUT? Answer with the single letter.\n"
+            f"Answer:",
             codes,
             {c: self._section_token_ids[c] for c in codes},
         )

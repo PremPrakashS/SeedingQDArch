@@ -14,6 +14,17 @@ AMBIGUITY_MARGIN = 0.03   # top-2 section cosine within this → AMBIGUOUS
 DIV_THRESHOLD = 0.18      # division confidence below this → NEEDS_REVIEW
 SEC_THRESHOLD = 0.25      # section confidence below this → NEEDS_REVIEW
 
+# How far a demoted section (N) must lead the best real-domain section before we
+# accept that the project has no domain subject at all and let N stand.
+#
+# Measured on the corpus: methodology and research-about-research papers lead by
+# a lot ("Qualitative Research Using Open Tools" +0.271, "Making Qualitative Data
+# Reusable" +0.227, "Grounded Theory: Steps and Procedures" +0.127), while domain
+# research only edges N ("Women's experiences with the healthcare system" +0.053,
+# "Risk communication and energy resilience" +0.008). Below this margin the
+# project has a real subject and that subject wins.
+N_KEEP_MARGIN = 0.08
+
 
 @dataclass
 class ClassificationResult:
@@ -65,7 +76,25 @@ class ISICEmbedder:
         self._section_embeddings = self._encode(enriched)
         log.info("Pre-encoded %d enriched section embeddings", len(self._section_labels))
 
-    def classify(self, summary: str, topk: int = 3) -> ClassificationResult:
+    def classify(
+        self,
+        summary: str,
+        topk: int = 3,
+        demote: frozenset[str] = frozenset(),
+    ) -> ClassificationResult:
+        """Two-step section → division classification.
+
+        ``demote`` names sections that may not win the primary label just for
+        being research (in practice: N, "all research is R&D"). When such a
+        section tops the cosine ranking, the best real-domain section is promoted
+        instead and the demoted section becomes the secondary — UNLESS it leads
+        by at least N_KEEP_MARGIN, which means the text has no domain subject at
+        all (a methodology or research-data paper). Those are genuinely N and are
+        left alone.
+
+        Demoted sections are excluded from ``section_ranked`` whenever they lose
+        the primary slot, so the LLM re-ranker cannot simply re-select them.
+        """
         if self._model is None:
             raise RuntimeError("ISICEmbedder.load() must be called first")
 
@@ -75,23 +104,49 @@ class ISICEmbedder:
         # Step 1 — section
         sec_scores = _cosine_scores(summary_vec, self._section_embeddings)
         ranked = np.argsort(sec_scores)[::-1]
-        top_idx, second_idx = ranked[0], ranked[1]
+
+        domain = [i for i in ranked if self._section_labels[i] not in demote]
+        if not domain:  # everything demoted — nothing to promote to
+            domain = list(ranked)
+
+        # Does a demoted section top the ranking, and if so does it lead the best
+        # domain section by enough to mean "this has no domain subject"?
+        demoted_top = self._section_labels[ranked[0]] in demote
+        lead = float(sec_scores[ranked[0]] - sec_scores[domain[0]])
+        promote = demoted_top and lead < N_KEEP_MARGIN
+
+        if promote:
+            candidates = domain                       # N barred, domain wins
+            flags.append(f"{self._section_labels[ranked[0]]}_demoted")
+        else:
+            candidates = list(ranked)                 # normal ranking
+            if demoted_top:
+                flags.append("no_domain_subject")     # N stands: methods/meta paper
+
+        top_idx = candidates[0]
+        second_idx = ranked[0] if promote else (
+            candidates[1] if len(candidates) > 1 else ranked[1]
+        )
+
         top_section = self._section_labels[top_idx]
         sec_conf = float(sec_scores[top_idx])
-        margin = float(sec_scores[top_idx] - sec_scores[second_idx])
+        margin = (
+            float(sec_scores[top_idx] - sec_scores[candidates[1]])
+            if len(candidates) > 1 else 1.0
+        )
 
         if margin < AMBIGUITY_MARGIN:
             flags.append("AMBIGUOUS")
 
         section_ranked = [
             (self._section_labels[i], self._section_titles[i], float(sec_scores[i]))
-            for i in ranked[:topk]
+            for i in candidates[:topk]
         ]
 
         # Step 2 — division within the top section
         top_division, top_div_title, div_conf = self._best_division(summary_vec, top_section)
 
-        # Secondary — second-best section with its own best division
+        # Secondary — runner-up section with its own best division
         sec2 = self._section_labels[second_idx]
         div2_code, div2_title, _ = self._best_division(summary_vec, sec2)
 
